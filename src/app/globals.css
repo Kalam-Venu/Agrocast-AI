@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground-rgb: 24, 24, 27;
+  --background-start-rgb: 250, 252, 250;
+  --background-end-rgb: 255, 255, 255;
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background: linear-gradient(
+      to bottom,
+      transparent,
+      rgb(var(--background-end-rgb))
+    )
+    rgb(var(--background-start-rgb));
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+html[lang="te"] body,
+html[lang="te"] body * {
+  font-family: var(--font-noto-sans-telugu), sans-serif;
+  font-synthesis: none;
+  letter-spacing: normal;
+}
+
+html[lang="te"] body {
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.7;
+}
+
+html[lang="te"] body :is(.text-sm) {
+  font-size: 0.9375rem;
+  line-height: 1.65;
+}
+
+html[lang="te"] body :is(.text-xs) {
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+
+html[lang="te"] body [class~="text-[10px]"],
+html[lang="te"] body [class~="text-[11px]"] {
+  font-size: 0.8125rem;
+  line-height: 1.55;
+}
+
+html[lang="te"] body label,
+html[lang="te"] body label[class],
+html[lang="te"] body small {
+  font-size: 0.9375rem;
+  font-weight: 400;
+  line-height: 1.65;
+}
+
+html[lang="te"] body :is(button, input, select, textarea) {
+  font-weight: 500;
+  line-height: 1.6;
+}
+
+html[lang="te"] body [class~="font-medium"],
+html[lang="te"] body [class~="font-semibold"],
+html[lang="te"] body [class~="font-bold"],
+html[lang="te"] body [class~="font-extrabold"],
+html[lang="te"] body [class~="font-black"] {
+  font-weight: 500;
+}
+
+html[lang="te"] body :is(h1, h2, h3, h4, h5, h6, strong, b) {
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #94a3b8;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}

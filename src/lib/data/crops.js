@@ -1,0 +1,15 @@
+export const COMMON_AP_CROPS = [
+  { id: 'paddy', name: 'Paddy (వరి)', nameEn: 'Paddy', nameTe: 'వరి', category: 'Cereals' },
+  { id: 'chilli', name: 'Chilli (మిరప)', nameEn: 'Chilli', nameTe: 'మిరప', category: 'Spices' },
+  { id: 'cotton', name: 'Cotton (పత్తి)', nameEn: 'Cotton', nameTe: 'పత్తి', category: 'Commercial' },
+  { id: 'groundnut', name: 'Groundnut (వేరుశనగ)', nameEn: 'Groundnut', nameTe: 'వేరుశనగ', category: 'Oilseeds' },
+  { id: 'chickpea', name: 'Bengal Gram (శనగలు)', nameEn: 'Chickpea (Bengal Gram)', nameTe: 'శనగలు', category: 'Pulses' },
+  { id: 'maize', name: 'Maize (మొక్కజొన్న)', nameEn: 'Maize', nameTe: 'మొక్కజొన్న', category: 'Cereals' },
+  { id: 'black-gram', name: 'Black Gram (మినుములు)', nameEn: 'Black Gram', nameTe: 'మినుములు', category: 'Pulses' },
+  { id: 'red-gram', name: 'Red Gram (కందులు)', nameEn: 'Red Gram', nameTe: 'కందులు', category: 'Pulses' },
+  { id: 'sugarcane', name: 'Sugarcane (చెరకు)', nameEn: 'Sugarcane', nameTe: 'చెరకు', category: 'Commercial' },
+  { id: 'banana', name: 'Banana (అరటి)', nameEn: 'Banana', nameTe: 'అరటి', category: 'Horticulture' },
+  { id: 'mango', name: 'Mango (మామిడి)', nameEn: 'Mango', nameTe: 'మామిడి', category: 'Horticulture' },
+  { id: 'tomato', name: 'Tomato (టమోటా)', nameEn: 'Tomato', nameTe: 'టమోటా', category: 'Vegetables' },
+  { id: 'tobacco', name: 'Tobacco (పొగాకు)', nameEn: 'Tobacco', nameTe: 'పొగాకు', category: 'Commercial' },
+];
