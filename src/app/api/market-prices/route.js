@@ -128,6 +128,87 @@ function unavailableResponse(reason, status = 503, cached = null) {
   );
 }
 
+function sanitizeErrorMessage(message, apiKey) {
+  if (typeof message !== 'string') return null;
+
+  const keys = [apiKey, encodeURIComponent(apiKey)].filter(Boolean);
+  let sanitized = message;
+  for (const key of keys) {
+    sanitized = sanitized.replaceAll(key, '[REDACTED]');
+  }
+
+  return sanitized
+    .replace(/https?:\/\/[^\s"'<>?]+(?:\?[^\s"'<>]*)?/gi, (url) => {
+      const queryIndex = url.indexOf('?');
+      return queryIndex === -1
+        ? url
+        : `${url.slice(0, queryIndex)}?[REDACTED]`;
+    })
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED]')
+    .replace(
+      /\b(api[-_]?key|authorization|token|password)(\s*[=:]\s*)[^\s,;]+/gi,
+      '$1$2[REDACTED]'
+    )
+    .slice(0, 300);
+}
+
+function getFetchErrorDiagnostics(error, apiKey) {
+  const causes = [];
+  let cause = error?.cause;
+  while (cause && causes.length < 3) {
+    causes.push(cause);
+    cause = cause.cause;
+  }
+
+  const normalizedCodes = [error?.code, ...causes.map((item) => item?.code)]
+    .filter(Boolean)
+    .map((code) => String(code).toUpperCase());
+  const causeMessages = causes.map((item) => item?.message || '').join(' ');
+  const normalizedMessages = `${causeMessages} ${error?.message || ''}`.toUpperCase();
+  let failureType = 'network';
+
+  if (
+    [error?.name, ...causes.map((item) => item?.name)].some((name) =>
+      ['TimeoutError', 'AbortError'].includes(name)
+    ) ||
+    normalizedCodes.some(
+      (code) => code.includes('TIMEOUT') || code === 'ETIMEDOUT'
+    )
+  ) {
+    failureType = 'timeout';
+  } else if (
+    normalizedCodes.some((code) =>
+      ['ENOTFOUND', 'EAI_AGAIN', 'EAI_FAIL', 'ENODATA'].includes(code)
+    )
+  ) {
+    failureType = 'dns';
+  } else if (
+    normalizedCodes.some(
+      (code) =>
+        code.includes('CERT') ||
+        code.includes('TLS') ||
+        code.includes('SSL') ||
+        code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'
+    ) ||
+    /CERTIFICATE|TLS|SSL/.test(normalizedMessages)
+  ) {
+    failureType = 'tls';
+  } else if (normalizedCodes.includes('ECONNRESET')) {
+    failureType = 'connection_reset';
+  } else if (normalizedCodes.includes('ECONNREFUSED')) {
+    failureType = 'connection_refused';
+  }
+
+  return {
+    name: error?.name || 'UnknownError',
+    code: error?.code || null,
+    failureType,
+    causeName: causes[0]?.name || null,
+    causeCode: causes[0]?.code || null,
+    causeMessage: sanitizeErrorMessage(causes[0]?.message, apiKey),
+  };
+}
+
 export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url);
@@ -182,14 +263,11 @@ export async function GET(request) {
         signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
       });
     } catch (error) {
-      console.warn('AGMARKNET market request failed.', {
-        name: error?.name || 'UnknownError',
-        code: error?.code || null,
-        timeout: error?.name === 'TimeoutError' || error?.name === 'AbortError',
-      });
+      const diagnostics = getFetchErrorDiagnostics(error, apiKey);
+      console.warn('AGMARKNET market request failed.', diagnostics);
       const cached = getCachedResponse(cacheKey);
       return unavailableResponse(
-        error?.name === 'TimeoutError' || error?.name === 'AbortError'
+        diagnostics.failureType === 'timeout'
           ? 'AGMARKNET data source timed out.'
           : 'Could not connect to the AGMARKNET data source.',
         502,
@@ -199,6 +277,7 @@ export async function GET(request) {
 
     if (!response.ok) {
       console.warn('AGMARKNET market upstream returned an error.', {
+        failureType: 'http',
         httpStatus: response.status,
       });
       return unavailableResponse(`AGMARKNET returned HTTP ${response.status}.`, response.status === 429 ? 429 : 502, cached);
