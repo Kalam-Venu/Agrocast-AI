@@ -50,6 +50,12 @@ function responseError(language, code, status) {
   return NextResponse.json({ error: localized[language], code }, { status });
 }
 
+function safeChemicalFallback(language) {
+  return language === 'te'
+    ? 'కచ్చితమైన పురుగుమందు, శిలీంద్రనాశిని లేదా ఎరువుల మోతాదు, కలయిక లేదా అనధికారిక ఉపయోగ సూచనలు ఇవ్వడం సురక్షితం కాదు. వృత్తిపరమైన రోగ నిర్ధారణకు స్థానిక వ్యవసాయ అధికారి/KVKను సంప్రదించండి. ప్రస్తుతం వర్షం, తేమ మరియు మొక్కల పరిస్థితిని బట్టి పర్యవేక్షణ, పారిశుద్ధ్యం మరియు అనుమతించిన రసాయనేతర నియంత్రణ పద్ధతులు వాడండి.'
+    : 'I cannot provide an unsupported pesticide, fungicide, fertilizer dosage, chemical mixture, or unverified application instruction. Consult a local Agriculture Officer or KVK for a field diagnosis and follow the current registered product label. Use safe preventive steps such as field monitoring, sanitation, weather precautions, and approved non-chemical controls where suitable.';
+}
+
 function safeText(value, maxLength = 100) {
   return typeof value === 'string' ? value.trim().slice(0, maxLength) : '';
 }
@@ -245,9 +251,17 @@ Guidance:
     }
     if (containsActionableChemicalInstruction(reply)) {
       console.warn(
-        'Gemini advisor response contained a chemical application instruction.'
+        'Gemini advisor response rejected: potential actionable chemical instruction.',
+        { provider: GEMINI_MODEL, intent: classification.intent, language }
       );
-      return responseError(language, 'AI_PROVIDER_INVALID_RESPONSE', 502);
+      return NextResponse.json({
+        reply: safeChemicalFallback(language),
+        intent: classification.intent,
+        crop: classification.crop,
+        provider: 'safety fallback',
+        language,
+        safetyFallback: true,
+      });
     }
 
     return NextResponse.json({

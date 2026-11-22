@@ -6,6 +6,7 @@ const SOURCE = 'AGMARKNET / Ministry of Agriculture & Farmers Welfare, Governmen
 const SOURCE_URL = 'https://agmarknet.gov.in';
 const CACHE_TTL_MS = 30 * 60 * 1000;
 const MAX_CACHE_ENTRIES = 100;
+const UPSTREAM_TIMEOUT_MS = 12000;
 const responseCache = new Map();
 
 function cleanNumber(value) {
@@ -155,7 +156,7 @@ export async function GET(request) {
 
     const cacheKey = JSON.stringify({ ...filters, limit, offset });
     const cached = getCachedResponse(cacheKey);
-    const apiKey = process.env.DATA_GOV_IN_API_KEY;
+    const apiKey = process.env.DATA_GOV_IN_API_KEY?.trim();
     if (!apiKey) {
       return unavailableResponse('DATA_GOV_IN_API_KEY is not configured.', 503, cached);
     }
@@ -173,12 +174,33 @@ export async function GET(request) {
     if (filters.variety) params.set('filters[variety]', filters.variety);
     if (filters.grade) params.set('filters[grade]', filters.grade);
 
-    const response = await fetch(`${BASE_URL}?${params.toString()}`, {
-      headers: { Accept: 'application/json' },
-      cache: 'no-store',
-    });
+    let response;
+    try {
+      response = await fetch(`${BASE_URL}?${params.toString()}`, {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      });
+    } catch (error) {
+      console.warn('AGMARKNET market request failed.', {
+        name: error?.name || 'UnknownError',
+        code: error?.code || null,
+        timeout: error?.name === 'TimeoutError' || error?.name === 'AbortError',
+      });
+      const cached = getCachedResponse(cacheKey);
+      return unavailableResponse(
+        error?.name === 'TimeoutError' || error?.name === 'AbortError'
+          ? 'AGMARKNET data source timed out.'
+          : 'Could not connect to the AGMARKNET data source.',
+        502,
+        cached
+      );
+    }
 
     if (!response.ok) {
+      console.warn('AGMARKNET market upstream returned an error.', {
+        httpStatus: response.status,
+      });
       return unavailableResponse(`AGMARKNET returned HTTP ${response.status}.`, response.status === 429 ? 429 : 502, cached);
     }
 
@@ -235,6 +257,10 @@ export async function GET(request) {
     cacheResponse(cacheKey, result);
     return NextResponse.json(result);
   } catch (error) {
+    console.warn('AGMARKNET market route failed.', {
+      name: error?.name || 'UnknownError',
+      code: error?.code || null,
+    });
     const { searchParams } = new URL(request.url);
     const cacheKey = JSON.stringify({
       state: searchParams.get('state')?.trim() || 'Andhra Pradesh',
