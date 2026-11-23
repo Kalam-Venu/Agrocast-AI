@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import {
+  buildStatewideResponse,
   buildStatewideCandidates,
   collectCandidateRecords,
   deduplicateAndSortRecords,
   paginateRecords,
+  summarizeStatewideCollection,
   TtlCache,
 } from './src/lib/market/agmarknetV2.mjs';
 
@@ -117,7 +119,49 @@ async function run() {
   assert.equal(maxActiveRequests, 2);
   assert.equal(collected.records.length, 2);
   assert.equal(collected.failures.length, 1);
+  assert.equal(collected.attempted, 3);
+  const partialSnapshot = summarizeStatewideCollection(
+    collected,
+    3,
+    '2026-11-20T00:00:00.000Z'
+  );
+  assert.equal(partialSnapshot.unavailable, false);
+  assert.equal(partialSnapshot.failedCombinations, 1);
+  assert.match(partialSnapshot.reason, /Results are incomplete/);
   console.log('PASS bounded concurrent collection preserves successes after partial failure');
+
+  const allFailed = await collectCandidateRecords(
+    [{ id: 1 }, { id: 2 }],
+    async () => {
+      throw new Error('simulated upstream outage');
+    },
+    2
+  );
+  const unavailableSnapshot = summarizeStatewideCollection(
+    allFailed,
+    2,
+    '2026-11-20T00:00:00.000Z'
+  );
+  assert.deepEqual(unavailableSnapshot.records, []);
+  assert.equal(unavailableSnapshot.unavailable, true);
+  assert.equal(unavailableSnapshot.failedCombinations, 2);
+  assert.match(unavailableSnapshot.reason, /No genuine AGMARKNET 2\.0 prices/);
+  assert.doesNotMatch(unavailableSnapshot.reason, /Showing genuine prices/);
+  console.log('PASS all failed upstream checks produce an honest unavailable snapshot');
+
+  const abortController = new AbortController();
+  const stopped = await collectCandidateRecords(
+    [{ id: 1 }, { id: 2 }, { id: 3 }],
+    async () => {
+      abortController.abort();
+      throw new Error('simulated deadline');
+    },
+    1,
+    { signal: abortController.signal }
+  );
+  assert.equal(stopped.attempted, 1);
+  assert.equal(stopped.failures.length, 1);
+  console.log('PASS collection stops scheduling requests after its deadline');
 
   let now = 100;
   const cache = new TtlCache(50, 2, () => now);
@@ -127,6 +171,78 @@ async function run() {
   now = 151;
   assert.equal(cache.get('statewide'), null);
   console.log('PASS statewide result cache expires at its TTL');
+
+  let filterLoads = 0;
+  const filterCache = new TtlCache(50, 1, () => now);
+  const loadFilters = () =>
+    filterCache.getOrLoad('official-filters', async () => {
+      filterLoads += 1;
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      return filterData;
+    });
+  const concurrentFilters = await Promise.all([
+    loadFilters(),
+    loadFilters(),
+    loadFilters(),
+  ]);
+  assert.equal(filterLoads, 1);
+  assert.equal(concurrentFilters.every((item) => item === filterData), true);
+  await loadFilters();
+  assert.equal(filterLoads, 1);
+  now += 51;
+  await loadFilters();
+  assert.equal(filterLoads, 2);
+  console.log('PASS filter metadata loads are coalesced and cached until TTL expiry');
+
+  const responseOptions = {
+    limit: 20,
+    offset: 0,
+    cached: false,
+    latestArrivalDate: null,
+    source: 'AGMARKNET 2.0',
+    sourceUrl: 'https://agmarknet.gov.in',
+  };
+  const failedResponse = buildStatewideResponse(
+    unavailableSnapshot,
+    responseOptions
+  );
+  assert.equal(failedResponse.status, 503);
+  assert.equal(failedResponse.body.unavailable, true);
+  assert.equal(failedResponse.body.dataStatus, 'unavailable');
+  assert.equal(failedResponse.body.count, 0);
+  assert.equal(failedResponse.body.failedCombinations, 2);
+  console.log('PASS all failed price requests return HTTP 503 and unavailable body');
+
+  const successfulEmpty = await collectCandidateRecords(
+    [{ id: 1 }],
+    async () => [],
+    1
+  );
+  const emptySnapshot = summarizeStatewideCollection(
+    successfulEmpty,
+    1,
+    '2026-11-20T00:00:00.000Z'
+  );
+  const emptyResponse = buildStatewideResponse(emptySnapshot, responseOptions);
+  assert.equal(emptyResponse.status, 200);
+  assert.equal(emptyResponse.body.unavailable, true);
+  assert.equal(emptyResponse.body.dataStatus, 'unavailable');
+  assert.equal(emptyResponse.body.count, 0);
+  assert.equal(emptyResponse.body.failedCombinations, 0);
+  console.log('PASS successful requests with no matching prices return HTTP 200');
+
+  const partialResponse = buildStatewideResponse(
+    partialSnapshot,
+    { ...responseOptions, limit: 1 }
+  );
+  assert.equal(partialResponse.status, 200);
+  assert.equal(partialResponse.body.unavailable, false);
+  assert.equal(partialResponse.body.dataStatus, 'live');
+  assert.equal(partialResponse.body.partial, true);
+  assert.equal(partialResponse.body.records.length, 1);
+  assert.equal(partialResponse.body.count, 1);
+  assert.equal(partialResponse.body.failedCombinations, 1);
+  console.log('PASS genuine partial results return HTTP 200 with records');
 
   const merged = deduplicateAndSortRecords([
     record('2026-11-19', 'Market A'),

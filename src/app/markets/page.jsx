@@ -363,7 +363,11 @@ export default function MarketsPage() {
 
           <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white p-4 text-xs text-slate-600">
             <div>
-              <strong>{t('common.source')}:</strong> {liveMarketPrices[0]?.source || 'AGMARKNET / data.gov.in'}
+              <strong>{t('common.source')}:</strong>{' '}
+              {liveMarketPrices[0]?.source ||
+                (marketPriceStatus.dataStatus === 'loading'
+                  ? 'AGMARKNET 2.0'
+                  : t('markets.unavailableData'))}
               {marketPriceStatus.latestArrivalDate && (
                 <span className="ml-2">{t('markets.lastAvailableDate')}: {marketPriceStatus.latestArrivalDate}</span>
               )}

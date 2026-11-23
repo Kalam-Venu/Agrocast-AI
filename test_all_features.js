@@ -258,7 +258,8 @@ async function runTests() {
             !record.marketName ||
             !record.district ||
             !record.arrivalDate ||
-            !Number.isFinite(record.modalPrice)
+            !Number.isFinite(record.modalPrice) ||
+            record.modalPrice <= 0
         )
       ) {
         throw new Error('Market record source or state is invalid');
@@ -266,19 +267,67 @@ async function runTests() {
       if (res.json.records.length && !res.json.latestArrivalDate) {
         throw new Error('Latest available arrival date is missing');
       }
-      const cached = await fetchUrl(`${BASE_URL}/api/market-prices?limit=10`);
-      if (
-        cached.status !== 200 ||
-        cached.json?.isCached !== true ||
-        cached.json?.pagination?.total !== res.json?.pagination?.total
+      if (res.json.records.length) {
+        const cached = await fetchUrl(`${BASE_URL}/api/market-prices?limit=10`);
+        if (
+          cached.status !== 200 ||
+          cached.json?.isCached !== true ||
+          cached.json?.pagination?.total !== res.json?.pagination?.total
+        ) {
+          throw new Error('Statewide response was not cached consistently');
+        }
+      } else if (
+        res.json.unavailable !== true ||
+        res.json.dataStatus !== 'unavailable' ||
+        !/No genuine AGMARKNET 2\.0 prices|No current AGMARKNET 2\.0 prices/.test(
+          res.json.reason || ''
+        )
       ) {
-        throw new Error('Statewide response was not cached consistently');
+        throw new Error('Empty statewide results are not reported honestly');
       }
     } else if (
       ![502, 503, 429].includes(res.status) ||
       res.json?.unavailable !== true
     ) {
       throw new Error(`Unexpected unavailable response: HTTP ${res.status}`);
+    }
+  });
+
+  await test('GET /api/market-prices -> preserves specific Kurnool Groundnut V2 records', async () => {
+    const params = new URLSearchParams({
+      state: 'Andhra Pradesh',
+      district: 'Kurnool',
+      market: 'Kurnool APMC',
+      commodity: 'Groundnut',
+      limit: '20',
+      offset: '0',
+    });
+    const res = await fetchUrl(
+      `${BASE_URL}/api/market-prices?${params.toString()}`
+    );
+    if (
+      res.status !== 200 ||
+      res.json?.unavailable ||
+      res.json?.source?.startsWith('AGMARKNET 2.0') !== true ||
+      !Array.isArray(res.json?.records) ||
+      !res.json.records.length
+    ) {
+      throw new Error('Specific Kurnool Groundnut prices are unavailable');
+    }
+    if (
+      res.json.records.some(
+        (record) =>
+          record.state !== 'Andhra Pradesh' ||
+          record.district !== 'Kurnool' ||
+          record.marketName !== 'Kurnool APMC' ||
+          record.commodity !== 'Groundnut' ||
+          !/^\d{4}-\d{2}-\d{2}$/.test(record.arrivalDate) ||
+          !Number.isFinite(record.modalPrice) ||
+          record.modalPrice <= 0 ||
+          record.unit !== '₹ / Quintal'
+      )
+    ) {
+      throw new Error('Specific market prices contain invalid or mismatched records');
     }
   });
 

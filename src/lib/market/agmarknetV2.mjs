@@ -26,6 +26,7 @@ export class TtlCache {
     this.maxEntries = maxEntries;
     this.now = now;
     this.entries = new Map();
+    this.pendingLoads = new Map();
   }
 
   get(key) {
@@ -43,6 +44,26 @@ export class TtlCache {
     this.entries.set(key, { value, cachedAt: this.now() });
     if (this.entries.size > this.maxEntries) {
       this.entries.delete(this.entries.keys().next().value);
+    }
+  }
+
+  async getOrLoad(key, loader, pendingKey = key) {
+    const cached = this.get(key);
+    if (cached !== null) return cached;
+
+    const pending = this.pendingLoads.get(pendingKey);
+    if (pending) return pending;
+
+    const load = Promise.resolve().then(loader);
+    this.pendingLoads.set(pendingKey, load);
+    try {
+      const value = await load;
+      this.set(key, value);
+      return value;
+    } finally {
+      if (this.pendingLoads.get(pendingKey) === load) {
+        this.pendingLoads.delete(pendingKey);
+      }
     }
   }
 }
@@ -198,11 +219,13 @@ export function buildStatewideCandidates(
 export async function collectCandidateRecords(
   candidates,
   fetchRecords,
-  concurrency = STATEWIDE_PRICE_CONCURRENCY
+  concurrency = STATEWIDE_PRICE_CONCURRENCY,
+  { signal } = {}
 ) {
   const results = [];
   const failures = [];
   let nextIndex = 0;
+  let attempted = 0;
   const workerCount = Math.min(
     Math.max(1, concurrency),
     candidates.length
@@ -210,9 +233,10 @@ export async function collectCandidateRecords(
 
   await Promise.all(
     Array.from({ length: workerCount }, async () => {
-      while (nextIndex < candidates.length) {
+      while (nextIndex < candidates.length && !signal?.aborted) {
         const index = nextIndex;
         nextIndex += 1;
+        attempted += 1;
         const candidate = candidates[index];
         try {
           const records = await fetchRecords(candidate);
@@ -224,7 +248,7 @@ export async function collectCandidateRecords(
     })
   );
 
-  return { records: results, failures };
+  return { records: results, failures, attempted };
 }
 
 export function deduplicateAndSortRecords(records) {
@@ -256,4 +280,75 @@ export function deduplicateAndSortRecords(records) {
 
 export function paginateRecords(records, limit, offset) {
   return records.slice(offset, offset + limit);
+}
+
+export function summarizeStatewideCollection(
+  collected,
+  candidateCount,
+  fetchedAt = new Date().toISOString()
+) {
+  const records = deduplicateAndSortRecords(collected.records);
+  const failedCombinations = collected.failures.length;
+  const attemptedCombinations = collected.attempted;
+  const unattemptedCombinations = Math.max(
+    0,
+    candidateCount - attemptedCombinations
+  );
+  let reason;
+
+  if (!records.length) {
+    reason =
+      failedCombinations || unattemptedCombinations
+        ? `No genuine AGMARKNET 2.0 prices were retrieved. ${failedCombinations} of ${attemptedCombinations} attempted market/commodity checks failed; ${unattemptedCombinations} of ${candidateCount} selected checks were not attempted.`
+        : `No current AGMARKNET 2.0 prices were returned from ${attemptedCombinations} official market/commodity checks.`;
+  } else if (failedCombinations || unattemptedCombinations) {
+    reason = `Showing genuine prices from a bounded statewide sample; ${failedCombinations} of ${attemptedCombinations} attempted checks failed and ${unattemptedCombinations} of ${candidateCount} selected checks were not attempted. Results are incomplete.`;
+  } else {
+    reason =
+      'Showing genuine prices from a bounded statewide sample of official markets and major commodities; this is not a complete statewide listing.';
+  }
+
+  return {
+    records,
+    reason,
+    unavailable: records.length === 0,
+    checkedCombinations: candidateCount,
+    attemptedCombinations,
+    failedCombinations,
+    fetchedAt,
+  };
+}
+
+export function buildStatewideResponse(
+  snapshot,
+  { limit, offset, cached, latestArrivalDate, source, sourceUrl }
+) {
+  const records = paginateRecords(snapshot.records, limit, offset);
+  const hasRecords = snapshot.records.length > 0;
+  return {
+    status:
+      !hasRecords && snapshot.failedCombinations > 0 ? 503 : 200,
+    body: {
+      unavailable: !hasRecords,
+      dataStatus: hasRecords ? (cached ? 'cached' : 'live') : 'unavailable',
+      records,
+      count: records.length,
+      source,
+      sourceUrl,
+      fetchedAt: snapshot.fetchedAt,
+      isCached: cached,
+      latestArrivalDate,
+      partial: true,
+      reason: snapshot.reason,
+      checkedCombinations: snapshot.checkedCombinations,
+      failedCombinations: snapshot.failedCombinations,
+      attemptedCombinations: snapshot.attemptedCombinations,
+      pagination: {
+        limit,
+        offset,
+        total: snapshot.records.length,
+        hasMore: offset + records.length < snapshot.records.length,
+      },
+    },
+  };
 }
