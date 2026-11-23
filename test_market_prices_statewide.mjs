@@ -6,6 +6,8 @@ import {
   deduplicateAndSortRecords,
   paginateRecords,
   summarizeStatewideCollection,
+  MAX_STATEWIDE_PRICE_REQUESTS,
+  STATEWIDE_PRICE_CONCURRENCY,
   TtlCache,
 } from './src/lib/market/agmarknetV2.mjs';
 
@@ -32,6 +34,42 @@ const filterData = {
   ],
 };
 
+const rotationFilterData = {
+  state_data: [{ state_id: 2, state_name: 'Andhra Pradesh' }],
+  district_data: Array.from({ length: 28 }, (_, index) => ({
+    id: 100 + index,
+    state_id: 2,
+    district_name: index === 6 ? 'Kurnool' : `District ${index + 1}`,
+  })),
+  market_data: Array.from({ length: 28 }, (_, index) => {
+    const districtId = 100 + index;
+    if (index === 6) {
+      return [929, 930, 931, 932, 933, 934, 935].map((id) => ({
+        id,
+        state_id: 2,
+        district_id: districtId,
+        mkt_name: id === 931 ? 'Kurnool APMC' : `Kurnool Market ${id}`,
+      }));
+    }
+    return [{
+      id: 2000 + index,
+      state_id: 2,
+      district_id: districtId,
+      mkt_name: `Market ${index + 1}`,
+    }];
+  }).flat(),
+  cmdt_data: [
+    { cmdt_id: 3, cmdt_name: 'Rice' },
+    { cmdt_id: 10, cmdt_name: 'Groundnut' },
+    { cmdt_id: 15, cmdt_name: 'Cotton' },
+    { cmdt_id: 4, cmdt_name: 'Maize' },
+    { cmdt_id: 73, cmdt_name: 'GreenChilli' },
+    { cmdt_id: 113, cmdt_name: 'DryChillies' },
+    { cmdt_id: 45, cmdt_name: 'Red Gram' },
+    { cmdt_id: 260, cmdt_name: 'Turmeric' },
+  ],
+};
+
 function record(arrivalDate, marketName, commodity = 'Rice', variety = 'Local') {
   return {
     state: 'Andhra Pradesh',
@@ -47,6 +85,41 @@ function record(arrivalDate, marketName, commodity = 'Rice', variety = 'Local') 
 }
 
 async function run() {
+  assert.equal(MAX_STATEWIDE_PRICE_REQUESTS, 26);
+  assert.equal(STATEWIDE_PRICE_CONCURRENCY, 4);
+  const statewideAtRotation3 = buildStatewideCandidates(
+    rotationFilterData,
+    { state: 'Andhra Pradesh', district: '', market: '', commodity: '' },
+    3,
+    100
+  );
+  const statewideAtRotation4 = buildStatewideCandidates(
+    rotationFilterData,
+    { state: 'Andhra Pradesh', district: '', market: '', commodity: '' },
+    4,
+    100
+  );
+  assert.equal(statewideAtRotation3.candidates.length, 26);
+  assert.equal(statewideAtRotation4.candidates.length, 26);
+  const kurnoolAtRotation3 = statewideAtRotation3.candidates.find(
+    ({ market }) => market.id === 931
+  );
+  const kurnoolAtRotation4 = statewideAtRotation4.candidates.find(
+    ({ market }) => market.district_id === 106
+  );
+  assert.equal(kurnoolAtRotation3.market.mkt_name, 'Kurnool APMC');
+  assert.equal(kurnoolAtRotation3.commodity.cmdt_name, 'Groundnut');
+  assert.notEqual(kurnoolAtRotation3.market.id, kurnoolAtRotation4.market.id);
+  assert.equal(
+    new Set(
+      statewideAtRotation3.candidates.map(
+        ({ market, commodity }) => `${market.id}:${commodity.cmdt_id}`
+      )
+    ).size,
+    statewideAtRotation3.candidates.length
+  );
+  console.log('PASS statewide rotations reach Kurnool APMC, vary official markets, and stay capped/deduplicated');
+
   const statewide = buildStatewideCandidates(
     filterData,
     {

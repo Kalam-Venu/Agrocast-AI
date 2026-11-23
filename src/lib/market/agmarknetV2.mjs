@@ -201,7 +201,7 @@ export function buildStatewideCandidates(
         .slice()
         .sort((a, b) => Number(a.id) - Number(b.id));
       const market = districtMarkets[
-        (rotation + index) % districtMarkets.length
+        (rotation + districtIndex) % districtMarkets.length
       ];
       const commodity =
         commodities[(districtIndex + rotation) % commodities.length];
