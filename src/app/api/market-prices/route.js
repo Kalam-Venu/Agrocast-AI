@@ -1,21 +1,30 @@
 import { NextResponse } from 'next/server';
+import {
+  buildStatewideCandidates,
+  collectCandidateRecords,
+  deduplicateAndSortRecords,
+  normalizeOfficialFilter,
+  paginateRecords,
+  STATEWIDE_PRICE_CONCURRENCY,
+  TtlCache,
+} from '../../../lib/market/agmarknetV2.mjs';
 
-const RESOURCE_ID = '9ef84268-d588-465a-a308-a864a43d0070';
-const BASE_URL = `https://api.data.gov.in/resource/${RESOURCE_ID}`;
 const AGMARKNET_V2_BASE_URL = 'https://api.agmarknet.gov.in/v1';
-const SOURCE =
-  'AGMARKNET / Ministry of Agriculture & Farmers Welfare, Government of India';
-const V2_SOURCE = 'AGMARKNET 2.0 / Ministry of Agriculture & Farmers Welfare, Government of India';
+const V2_SOURCE =
+  'AGMARKNET 2.0 / Ministry of Agriculture & Farmers Welfare, Government of India';
 const SOURCE_URL = 'https://agmarknet.gov.in';
 const CACHE_TTL_MS = 30 * 60 * 1000;
 const MAX_CACHE_ENTRIES = 100;
 const UPSTREAM_TIMEOUT_MS = 12000;
+const STATEWIDE_TIMEOUT_MS = 6000;
+const STATEWIDE_FILTER_TIMEOUT_MS = 2000;
 const ACCEPTED_V2_PRICE_UNITS = new Set([
   '₹/quintal',
   'rs./quintal',
   'inr/quintal',
 ]);
 const responseCache = new Map();
+const statewideResponseCache = new TtlCache(CACHE_TTL_MS, MAX_CACHE_ENTRIES);
 let agmarknetV2FiltersCache = null;
 
 function cleanNumber(value) {
@@ -24,47 +33,10 @@ function cleanNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
-function firstDefined(record, names) {
-  for (const name of names) {
-    if (record[name] != null && record[name] !== '') return record[name];
-  }
-  return null;
-}
-
-function parseRecord(record) {
-  const minPrice = cleanNumber(firstDefined(record, ['min_price', 'Min Price', 'Min_Price', 'minimum']));
-  const maxPrice = cleanNumber(firstDefined(record, ['max_price', 'Max Price', 'Max_Price', 'maximum']));
-  const modalPrice = cleanNumber(firstDefined(record, ['modal_price', 'Modal Price', 'Modal_Price', 'modal']));
-  const arrivalDate = firstDefined(record, ['arrival_date', 'Arrival Date', 'arrivaldate', 'Arrival_Date']);
-  const commodity = firstDefined(record, ['commodity', 'Commodity']);
-  const variety = firstDefined(record, ['variety', 'Variety']);
-  const grade = firstDefined(record, ['grade', 'Grade']);
-  const marketName = firstDefined(record, ['market', 'Market', 'market_name', 'Market Name']);
-  const district = firstDefined(record, ['district', 'District']);
-  const state = firstDefined(record, ['state', 'State']);
-
-  if (!commodity || !marketName || !district || modalPrice == null || !arrivalDate) return null;
-
-  return {
-    commodity: String(commodity).trim(),
-    variety: variety ? String(variety).trim() : null,
-    grade: grade ? String(grade).trim() : null,
-    marketName: String(marketName).trim(),
-    district: String(district).trim(),
-    state: String(state).trim(),
-    arrivalDate: String(arrivalDate).trim(),
-    minPrice,
-    maxPrice,
-    modalPrice,
-    unit: '₹ / Quintal',
-    source: SOURCE,
-    sourceUrl: SOURCE_URL,
-  };
-}
-
 function matchesFilters(record, filters) {
   const matches = (value, filter) =>
-    !filter || String(value || '').trim().toLowerCase() === filter.toLowerCase();
+    !filter ||
+    normalizeOfficialFilter(value) === normalizeOfficialFilter(filter);
   return (
     matches(record.district, filters.district) &&
     matches(record.marketName, filters.market) &&
@@ -72,14 +44,6 @@ function matchesFilters(record, filters) {
     matches(record.variety, filters.variety) &&
     matches(record.grade, filters.grade)
   );
-}
-
-function normalizeOfficialFilter(value) {
-  return String(value || '')
-    .normalize('NFKC')
-    .trim()
-    .replace(/\s+/g, ' ')
-    .toLocaleLowerCase('en');
 }
 
 function getLatestArrivalDate(records) {
@@ -121,7 +85,12 @@ function cacheResponse(cacheKey, payload) {
   }
 }
 
-function unavailableResponse(reason, status = 503, cached = null) {
+function unavailableResponse(
+  reason,
+  status = 503,
+  cached = null,
+  source = V2_SOURCE
+) {
   if (cached) {
     return NextResponse.json({
       ...cached.payload,
@@ -138,7 +107,7 @@ function unavailableResponse(reason, status = 503, cached = null) {
       reason,
       records: [],
       count: 0,
-      source: SOURCE,
+      source,
       sourceUrl: SOURCE_URL,
     },
     { status }
@@ -226,7 +195,7 @@ function getFetchErrorDiagnostics(error, apiKey) {
   };
 }
 
-async function getAgmarknetV2Filters() {
+async function getAgmarknetV2Filters(timeoutMs = UPSTREAM_TIMEOUT_MS) {
   if (
     agmarknetV2FiltersCache &&
     Date.now() - agmarknetV2FiltersCache.cachedAt < CACHE_TTL_MS
@@ -244,8 +213,8 @@ async function getAgmarknetV2Filters() {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       },
-      cache: 'no-store',
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      next: { revalidate: 60 * 60 },
+      signal: AbortSignal.timeout(timeoutMs),
     }
   );
   if (!response.ok) {
@@ -300,7 +269,7 @@ function getAgmarknetV2Records(payload, filters, market, district, commodity) {
         grade: null,
         marketName: market.mkt_name,
         district: district.district_name,
-        state: filters.state_name,
+        state: filters.state_name || filters.state,
         arrivalDate,
         minPrice: null,
         maxPrice: null,
@@ -391,7 +360,7 @@ async function getSpecificAgmarknetV2Prices(
           'User-Agent':
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         },
-        cache: 'no-store',
+        next: { revalidate: CACHE_TTL_MS / 1000 },
         signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
       }
     );
@@ -472,6 +441,188 @@ async function getSpecificAgmarknetV2Prices(
   }
 }
 
+function formatStatewideResponse(snapshot, filters, limit, offset, cached) {
+  const records = paginateRecords(snapshot.records, limit, offset);
+  const hasRecords = snapshot.records.length > 0;
+  return NextResponse.json({
+    unavailable: !hasRecords,
+    dataStatus: hasRecords ? (cached ? 'cached' : 'live') : 'unavailable',
+    records,
+    count: records.length,
+    source: V2_SOURCE,
+    sourceUrl: SOURCE_URL,
+    fetchedAt: snapshot.fetchedAt,
+    isCached: cached,
+    latestArrivalDate: getLatestArrivalDate(snapshot.records),
+    partial: true,
+    reason: snapshot.reason,
+    checkedCombinations: snapshot.checkedCombinations,
+    failedCombinations: snapshot.failedCombinations,
+    pagination: {
+      limit,
+      offset,
+      total: snapshot.records.length,
+      hasMore: offset + records.length < snapshot.records.length,
+    },
+  });
+}
+
+async function getStatewideAgmarknetV2Prices(filters, limit, offset) {
+  const rotation = Math.floor(Date.now() / CACHE_TTL_MS);
+  const cacheKey = JSON.stringify({ ...filters, rotation });
+  const cachedSnapshot = statewideResponseCache.get(cacheKey);
+  if (cachedSnapshot) {
+    return formatStatewideResponse(
+      cachedSnapshot,
+      filters,
+      limit,
+      offset,
+      true
+    );
+  }
+
+  let filterData;
+  try {
+    filterData = await getAgmarknetV2Filters(STATEWIDE_FILTER_TIMEOUT_MS);
+  } catch (error) {
+    const diagnostics = getFetchErrorDiagnostics(error, '');
+    if (error?.httpStatus) {
+      diagnostics.failureType = 'http';
+      diagnostics.httpStatus = error.httpStatus;
+    }
+    console.warn('AGMARKNET 2.0 statewide filters failed.', diagnostics);
+    return unavailableResponse(
+      diagnostics.failureType === 'timeout'
+        ? 'AGMARKNET 2.0 filter data timed out.'
+        : 'Could not load official AGMARKNET 2.0 market filters.',
+      error?.httpStatus === 429 ? 429 : 502,
+      null,
+      V2_SOURCE
+    );
+  }
+
+  const selection = buildStatewideCandidates(
+    filterData,
+    filters,
+    rotation
+  );
+  if (!selection.candidates.length) {
+    const reason =
+      selection.reason === 'market_ambiguous'
+        ? 'Multiple official markets have this name. Select its district and retry.'
+        : 'No official market and commodity combinations matched these filters.';
+    return NextResponse.json({
+      unavailable: true,
+      dataStatus: 'unavailable',
+      records: [],
+      count: 0,
+      source: V2_SOURCE,
+      sourceUrl: SOURCE_URL,
+      reason,
+      partial: true,
+      checkedCombinations: 0,
+      failedCombinations: 0,
+      pagination: { limit, offset, total: 0, hasMore: false },
+    });
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    STATEWIDE_TIMEOUT_MS
+  );
+  let collected;
+  try {
+    collected = await collectCandidateRecords(
+      selection.candidates,
+      async ({ state, market, commodity }) => {
+        const district = filterData.district_data.find(
+          (item) =>
+            Number(item.id) === Number(market.district_id) &&
+            Number(item.state_id) === Number(state.state_id)
+        );
+        if (!district) throw new Error('Official market district is missing.');
+
+        const params = new URLSearchParams({
+          marketId: String(market.id),
+          stateId: String(state.state_id),
+          commodityId: String(commodity.cmdt_id),
+          includeExcel: 'false',
+        });
+        const response = await fetch(
+          `${AGMARKNET_V2_BASE_URL}/prices-and-arrivals/market-price/lastweek?${params}`,
+          {
+            headers: {
+              Accept: 'application/json, text/plain, */*',
+              Origin: 'https://agmarknet.gov.in',
+              Referer: 'https://agmarknet.gov.in/',
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            },
+            next: { revalidate: CACHE_TTL_MS / 1000 },
+            signal: AbortSignal.any([
+              controller.signal,
+              AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+            ]),
+          }
+        );
+        if (!response.ok) {
+          const error = new Error(
+            'AGMARKNET 2.0 weekly-price request failed.'
+          );
+          error.httpStatus = response.status;
+          throw error;
+        }
+
+        const payload = await response.json();
+        if (payload?.success !== true || !Array.isArray(payload.data)) {
+          throw new Error('AGMARKNET 2.0 returned an invalid price report.');
+        }
+        return getAgmarknetV2Records(
+          payload,
+          filters,
+          market,
+          district,
+          commodity
+        );
+      },
+      STATEWIDE_PRICE_CONCURRENCY
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  const records = deduplicateAndSortRecords(collected.records);
+  const failedCombinations = collected.failures.length;
+  const reason = failedCombinations
+    ? `Showing actual prices from a bounded statewide sample; ${failedCombinations} of ${selection.candidates.length} official market/commodity checks failed, so results are incomplete.`
+    : 'Showing actual prices from a bounded statewide sample of official markets and major commodities; this is not a complete statewide listing.';
+  const snapshot = {
+    records,
+    reason,
+    checkedCombinations: selection.candidates.length,
+    failedCombinations,
+    fetchedAt: new Date().toISOString(),
+  };
+
+  if (failedCombinations) {
+    const failuresByType = {};
+    for (const { error } of collected.failures) {
+      const diagnostics = getFetchErrorDiagnostics(error, '');
+      const failureType = error?.httpStatus ? 'http' : diagnostics.failureType;
+      failuresByType[failureType] = (failuresByType[failureType] || 0) + 1;
+    }
+    console.warn('AGMARKNET 2.0 statewide results are partial.', {
+      checkedCombinations: selection.candidates.length,
+      failedCombinations,
+      failuresByType,
+    });
+  }
+
+  statewideResponseCache.set(cacheKey, snapshot);
+  return formatStatewideResponse(snapshot, filters, limit, offset, false);
+}
+
 export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url);
@@ -498,6 +649,23 @@ export async function GET(request) {
       return NextResponse.json({ error: 'offset must be a non-negative integer' }, { status: 400 });
     }
 
+    if (filters.grade) {
+      return NextResponse.json({
+        unavailable: true,
+        dataStatus: 'unavailable',
+        records: [],
+        count: 0,
+        source: V2_SOURCE,
+        sourceUrl: SOURCE_URL,
+        reason:
+          'AGMARKNET 2.0 weekly market-price records do not include grade, so this filter cannot be verified.',
+        partial: true,
+        checkedCombinations: 0,
+        failedCombinations: 0,
+        pagination: { limit, offset, total: 0, hasMore: false },
+      });
+    }
+
     const cacheKey = JSON.stringify({ ...filters, limit, offset });
     if (filters.market && filters.commodity) {
       return getSpecificAgmarknetV2Prices(
@@ -507,122 +675,17 @@ export async function GET(request) {
         cacheKey
       );
     }
-
-    const cached = getCachedResponse(cacheKey);
-    const apiKey = process.env.DATA_GOV_IN_API_KEY?.trim();
-    if (!apiKey) {
-      return unavailableResponse('DATA_GOV_IN_API_KEY is not configured.', 503, cached);
-    }
-
-    const params = new URLSearchParams({
-      'api-key': apiKey,
-      format: 'json',
-      limit: String(limit),
-      offset: String(offset),
-    });
-    params.set('filters[state]', filters.state);
-    if (filters.district) params.set('filters[district]', filters.district);
-    if (filters.market) params.set('filters[market]', filters.market);
-    if (filters.commodity) params.set('filters[commodity]', filters.commodity);
-    if (filters.variety) params.set('filters[variety]', filters.variety);
-    if (filters.grade) params.set('filters[grade]', filters.grade);
-
-    let response;
-    try {
-      response = await fetch(`${BASE_URL}?${params.toString()}`, {
-        headers: { Accept: 'application/json' },
-        cache: 'no-store',
-        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-      });
-    } catch (error) {
-      const diagnostics = getFetchErrorDiagnostics(error, apiKey);
-      console.warn('AGMARKNET market request failed.', diagnostics);
-      const cached = getCachedResponse(cacheKey);
-      return unavailableResponse(
-        diagnostics.failureType === 'timeout'
-          ? 'AGMARKNET data source timed out.'
-          : 'Could not connect to the AGMARKNET data source.',
-        502,
-        cached
-      );
-    }
-
-    if (!response.ok) {
-      console.warn('AGMARKNET market upstream returned an error.', {
-        failureType: 'http',
-        httpStatus: response.status,
-      });
-      return unavailableResponse(`AGMARKNET returned HTTP ${response.status}.`, response.status === 429 ? 429 : 502, cached);
-    }
-
-    const payload = await response.json().catch(() => null);
-    if (!payload || !Array.isArray(payload.records)) {
-      return unavailableResponse('AGMARKNET returned an invalid response.', 502, cached);
-    }
-
-    const rawRecords = payload.records;
-    const records = rawRecords
-      .filter((record) => {
-        const state = firstDefined(record, ['state', 'State']);
-        return state && String(state).trim().toLowerCase() === 'andhra pradesh';
-      })
-      .map(parseRecord)
-      .filter(Boolean)
-      .filter((record) => matchesFilters(record, filters));
-
-    if (records.length === 0) {
-      return NextResponse.json({
-        unavailable: true,
-        dataStatus: 'unavailable',
-        reason: 'No Andhra Pradesh market records matched these filters.',
-        records: [],
-        count: 0,
-        source: SOURCE,
-        sourceUrl: SOURCE_URL,
-        fetchedAt: new Date().toISOString(),
-        pagination: {
-          limit,
-          offset,
-          total: Number(payload.total) || Number(payload.count) || rawRecords.length,
-        },
-      });
-    }
-
-    const result = {
-      unavailable: false,
-      dataStatus: 'live',
-      records,
-      count: records.length,
-      source: SOURCE,
-      sourceUrl: SOURCE_URL,
-      fetchedAt: new Date().toISOString(),
-      isCached: false,
-      latestArrivalDate: getLatestArrivalDate(records),
-      pagination: {
-        limit,
-        offset,
-        total: Number(payload.total) || Number(payload.count) || rawRecords.length,
-        hasMore: offset + records.length < (Number(payload.total) || Number(payload.count) || rawRecords.length),
-      },
-    };
-    cacheResponse(cacheKey, result);
-    return NextResponse.json(result);
+    return getStatewideAgmarknetV2Prices(filters, limit, offset);
   } catch (error) {
     console.warn('AGMARKNET market route failed.', {
       name: error?.name || 'UnknownError',
       code: error?.code || null,
     });
-    const { searchParams } = new URL(request.url);
-    const cacheKey = JSON.stringify({
-      state: searchParams.get('state')?.trim() || 'Andhra Pradesh',
-      district: searchParams.get('district')?.trim() || '',
-      market: searchParams.get('market')?.trim() || '',
-      commodity: (searchParams.get('commodity') || searchParams.get('crop') || '').trim(),
-      variety: searchParams.get('variety')?.trim() || '',
-      grade: searchParams.get('grade')?.trim() || '',
-      limit: Number(searchParams.get('limit') || 20),
-      offset: Number(searchParams.get('offset') || 0),
-    });
-    return unavailableResponse('Could not connect to the AGMARKNET data source.', 502, getCachedResponse(cacheKey));
+    return unavailableResponse(
+      'Could not connect to the AGMARKNET 2.0 data source.',
+      502,
+      null,
+      V2_SOURCE
+    );
   }
 }

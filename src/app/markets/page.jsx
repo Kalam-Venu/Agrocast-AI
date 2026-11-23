@@ -67,6 +67,7 @@ export default function MarketsPage() {
     loading: true,
     dataStatus: 'loading',
     unavailable: false,
+    partial: false,
     message: '',
     pagination: { total: 0, limit: PRICE_PAGE_SIZE, offset: 0, hasMore: false },
   });
@@ -100,8 +101,9 @@ export default function MarketsPage() {
           setMarketPriceStatus({
             loading: false,
             unavailable: Boolean(payload.unavailable),
+            partial: Boolean(payload.partial),
             dataStatus: payload.dataStatus || (payload.unavailable ? 'unavailable' : 'live'),
-            message: payload.unavailable
+            message: payload.unavailable || payload.partial
               ? payload.reason || (isTelugu ? 'ధరలు అందుబాటులో లేవు.' : 'Prices are unavailable.')
               : '',
             latestArrivalDate: payload.latestArrivalDate || null,
@@ -112,6 +114,7 @@ export default function MarketsPage() {
           setMarketPriceStatus({
             loading: false,
             unavailable: true,
+            partial: false,
             dataStatus: payload.dataStatus || 'unavailable',
             message: payload.reason || (isTelugu ? 'అధికారిక ధర సేవ అందుబాటులో లేదు.' : 'Official price service is unavailable.'),
             pagination: payload.pagination || { total: 0, limit: PRICE_PAGE_SIZE, offset: priceOffset, hasMore: false },
@@ -123,6 +126,7 @@ export default function MarketsPage() {
         setMarketPriceStatus({
           loading: false,
           unavailable: true,
+          partial: false,
           dataStatus: 'unavailable',
           message: isTelugu ? 'అధికారిక ధర సేవకు కనెక్ట్ కాలేదు.' : 'Could not connect to the official price service.',
           pagination: { total: 0, limit: PRICE_PAGE_SIZE, offset: priceOffset, hasMore: false },
@@ -380,6 +384,17 @@ export default function MarketsPage() {
                     : t('markets.unavailableData')}
             </span>
           </div>
+
+          {marketPriceStatus.partial && liveMarketPrices.length > 0 && (
+            <div
+              role="status"
+              className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900"
+            >
+              {isTelugu
+                ? 'ఇవి AGMARKNET 2.0 నుంచి అందిన వాస్తవ ధరలు. పరిమిత మార్కెట్/పంట కలయికలను మాత్రమే పరిశీలించాం; ఇది రాష్ట్రంలోని అన్ని మార్కెట్ల పూర్తి జాబితా కాదు.'
+                : marketPriceStatus.message}
+            </div>
+          )}
 
           {marketPriceStatus.loading ? (
             <div className="p-5 rounded-xl border border-slate-200 bg-white text-sm text-slate-600">

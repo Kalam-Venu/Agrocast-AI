@@ -232,7 +232,7 @@ async function runTests() {
     }
   });
 
-  await test('GET /api/market-prices -> reports live data or explicit unavailability', async () => {
+  await test('GET /api/market-prices -> reports bounded AGMARKNET 2.0 statewide data', async () => {
     const res = await fetchUrl(`${BASE_URL}/api/market-prices?limit=10`);
     if (res.status === 200) {
       if (!Array.isArray(res.json?.records))
@@ -241,9 +241,18 @@ async function runTests() {
         throw new Error('Market data status missing');
       }
       if (
+        res.json?.source?.startsWith('AGMARKNET 2.0') !== true ||
+        res.json?.partial !== true ||
+        !Number.isInteger(res.json?.checkedCombinations) ||
+        res.json.checkedCombinations > 26
+      ) {
+        throw new Error('Statewide source or bounded-sample metadata missing');
+      }
+      if (
         res.json.records.some(
           (record) =>
             !record.source ||
+            !record.source.startsWith('AGMARKNET 2.0') ||
             record.state !== 'Andhra Pradesh' ||
             !record.commodity ||
             !record.marketName ||
@@ -256,6 +265,14 @@ async function runTests() {
       }
       if (res.json.records.length && !res.json.latestArrivalDate) {
         throw new Error('Latest available arrival date is missing');
+      }
+      const cached = await fetchUrl(`${BASE_URL}/api/market-prices?limit=10`);
+      if (
+        cached.status !== 200 ||
+        cached.json?.isCached !== true ||
+        cached.json?.pagination?.total !== res.json?.pagination?.total
+      ) {
+        throw new Error('Statewide response was not cached consistently');
       }
     } else if (
       ![502, 503, 429].includes(res.status) ||
